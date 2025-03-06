@@ -1,0 +1,1 @@
+This is a custom Gaussian Process Regression (GPR) model I've written using Python, JAX, Optax and a few other standard libraries. I did this to improve my understanding of the way they work at a fundamental level so I can apply them in novel situations. The code is currently being developed to optimise the injection efficiency at Diamond Light Source.
