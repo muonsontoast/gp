@@ -53,7 +53,9 @@ class GP:
         res = f'\nName: {self.name}'
         res += f'\nKernel: {self.kernel.name}'
         res += f'\nOptimiser: {self.optimiserName.title()} with a learning rate of {self.optimiserLearningRate}'
-        res += f'\nOptimiser Constraints: Lower = {self.bounds[0]}, Upper = {self.bounds[1]}'
+        lw = ''.join(f'{round(v_, 2):.2f}' for v_ in jnp.array(self.bounds[0]).flatten())
+        up = ''.join(f'{round(v_, 2):.2f}' for v_ in jnp.array(self.bounds[1]).flatten())
+        res += f'\nOptimiser Constraints: Lower = {lw}, Upper = {up}'
         res += f'\nAcquisition Function: {self.acquisitionFunction.name}'
         res += f'\nNoise Model: {self.noiseModel}\n'
         return res
@@ -88,7 +90,12 @@ class GP:
 
         super().__setattr__(name, value)
 
-    def __call__(self, x, y, xnew, variance = jnp.empty(0)):
+    def __call__(self, x, y, xnew, variance = jnp.empty(0), fitKernelHyperparams = True):
+        lw, up = jnp.min(x), jnp.max(x)
+        rng = up - lw
+        x, xnew = (x - lw) / rng, (xnew - lw) / rng
+        if fitKernelHyperparams:
+            self.FitKernelHyperparams(x, y, variance)
         x, xnew = self.FormatInputData(x), self.FormatInputData(xnew)
         if self.DimensionCheck(x):
             S11 = self.ConstructCovarianceMatrix(x, x) + self.ConstructMeasurementNoiseMatrix(x, variance)
@@ -138,6 +145,8 @@ class GP:
         return self.acquisitionFunction(m, jnp.diag(s))[0]
         
     def FitKernelHyperparams(self, x, y, variance, numIterations = 250, numRestarts = 10, returnAll = False):
+        lw, up = jnp.min(x), jnp.max(x)
+        x = (x - lw) / (up - lw)
         optimiser = optax.chain(
             self.optimiser(self.optimiserLearningRate)
         )
@@ -153,7 +162,7 @@ class GP:
             h, state = carry
             ll, g = gradLL(x, y, variance, h)
             u, state = optimiser.update(g, state, h)
-            return (jnp.clip(h + u, 1e-2, 2e1), state), ll
+            return (jnp.clip(h + u, 1e-3, 3e1), state), ll
         
         @jit
         def OuterLoop(h):
@@ -164,17 +173,13 @@ class GP:
         finalHs, lls = vmap(OuterLoop)(hs)
         if returnAll:
             return (finalHs, lls)
-        return finalHs[jnp.argmin(lls[:, -1])]
+        
+        self.kernel.SetAttrs(finalHs[jnp.argmin(lls[:, -1])])
 
     @partial(jit, static_argnums = 0)
     def LogLikelihood(self, x, y, variance, h = None):
         if h != None:
-            t, h_ = 0, [len(self.kernel._orderedAttrs)]
-            for _ in range(len(self.kernel._orderedAttrs)):
-                ln = len(self.kernel._orderedAttrs[_])
-                h_[_] = h[t:t + ln]
-                t += ln
-            S = self.ConstructCovarianceMatrix(x, x, h_) + self.ConstructMeasurementNoiseMatrix(x, variance)
+            S = self.ConstructCovarianceMatrix(x, x, self.kernel.Convert2OrderedAttrs(h)) + self.ConstructMeasurementNoiseMatrix(x, variance)
         else: S = self.ConstructCovarianceMatrix(x, x) + self.ConstructMeasurementNoiseMatrix(x, variance)
         chol = jnp.linalg.cholesky(S)
         Snew = jnp.linalg.solve(chol, y)
@@ -214,13 +219,6 @@ class GP:
     def ConstructMeasurementNoiseMatrix(self, x, variance = None):
         variance = jnp.zeros(x.shape[0]) if len(variance) == 0 else variance
         return jnp.diag(variance + global_smoothing_factor)
-    
-    def AssignOrderedAttrs(self, h):
-        t = 0
-        for _ in range(len(self.kernel._orderedAttrs)):
-            ln = len(self.kernel._orderedAttrs[_])
-            self.kernel._orderedAttrs[_] = h[t:t + ln]
-            t += ln
 
 @jit
 def warp(e, y, a = 1):

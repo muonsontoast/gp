@@ -192,6 +192,31 @@ class Kernel:
                 res[k] = v
         return res
     
+    def SetAttrs(self, h):
+        '''For setting attributes found by maximising the log likelihood'''
+        h, t = [float(h[_]) for _ in range(len(h))], 0
+        for _ in range(len(self.components)):
+            self.amplitude[_] = h[t:t + len(self.amplitude[_])] 
+            t += len(self.amplitude[_])
+            self.lengthscale[_] = h[t:t + len(self.lengthscale[_])]
+            t += len(self.lengthscale[_])
+            self.exponent[_] = h[t:t + len(self.exponent[_])]
+            t += len(self.exponent[_])
+            self.period[_] = h[t:t + len(self.period[_])]
+            t += len(self.period[_])
+
+        self._UpdateOrderedAttrs()
+    
+    @partial(jit, static_argnums = 0)
+    def Convert2OrderedAttrs(self, h):
+        ln = len(self._orderedAttrs)
+        t, h_ = 0, [[] for _ in range(ln)]
+        for _ in range(ln):
+            ln = len(self._orderedAttrs[_])
+            h_[_] = h[t:t + ln]
+            t += ln
+        return h_
+    
     def _UpdateOrderedAttrs(self, attrs = None):
         numComponents = len(self.components)
         super().__setattr__('_orderedAttrs', [[] for _ in range(numComponents)])
