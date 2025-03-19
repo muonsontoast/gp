@@ -194,7 +194,7 @@ class Kernel:
     
     def SetAttrs(self, h):
         '''For setting attributes found by maximising the log likelihood'''
-        h, t = [float(h[_]) for _ in range(len(h))], 0
+        t = 0
         for _ in range(len(self.components)):
             self.amplitude[_] = h[t:t + len(self.amplitude[_])] 
             t += len(self.amplitude[_])
@@ -320,8 +320,8 @@ class Linear(Kernel):
     def __init__(self, dimension = 1):
         super().__init__(dimension)
         object.__setattr__(self, 'name', 'Linear')
-        object.__setattr__(self, 'description', 'Best when combined with other kernels')
-        object.__setattr__(self, 'amplitude', [[1] * 2 * dimension])
+        object.__setattr__(self, 'description', 'Best combined with other kernels')
+        object.__setattr__(self, 'amplitude', [[1] * 2])
         object.__setattr__(self, 'offset', [[0] * dimension])
         object.__setattr__(self, 'components', ['Linear'])
         object.__setattr__(self, 'componentNames', ['Linear'])

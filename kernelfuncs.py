@@ -3,8 +3,10 @@ Author: Shaun Preston (John Adams Institute, University of Oxford, Diamond Light
 
 Kernel functional definitions
 """
+
 import jax.numpy as jnp
 from jax import jit
+import jax
 
 @jit
 def SE(x0, x1, h):
@@ -45,5 +47,4 @@ def M52(x0, x1, h):
 @jit
 def Linear(x0, x1, h):
     h = jnp.array(h[0])
-    dim = int(h.shape[0] / 3)
-    return (h[dim:2 * dim] ** 2 + (x0 - h[:dim]).T @ jnp.diag(h[2 * dim:] ** 2) @ (x1 - h[:dim]))
+    return h[0] + h[1] * (x0 - h[2:]) * (x1 - h[2:])
