@@ -44,7 +44,7 @@ class Kernel:
                 res += f'\n\n * {self.componentNames[_]} (Type: {l}) - Component {idx} *'
                 for k, v in attrs.items():
                     if k in attrsToCheck and len(v[_]) > 0:
-                        v = [f'{round(v_, 2):.2f}' for v_ in jnp.array(v).flatten()]
+                        v = [f'{round(v_, 2):.3f}' for v_ in jnp.array(v).flatten()]
                         res += f'{k.title()}: ' + ', '.join(v) + '\n'
                 idx += 1
             res += '\n'
@@ -52,7 +52,7 @@ class Kernel:
             res += '\n\n'
             for k, v in attrs.items():
                 if k in attrsToCheck and len(v[0]) > 0:
-                    v = [f'{round(v_, 2):.2f}' for v_ in jnp.array(v).flatten()]
+                    v = [f'{round(v_, 2):.3f}' for v_ in jnp.array(v).flatten()]
                     res += f'{k.title()}: ' + ', '.join(v) + '\n'
         return res
 
@@ -95,7 +95,7 @@ class Kernel:
             return self.f(x0, x1, self._orderedAttrs)
         print(f'Input data is the wrong dimension!')
 
-    @partial(jit, static_argnums = 0)
+    # @partial(jit, static_argnums = 0)
     def _CallWithoutChecks(self, x0, x1, h = None):
         '''Should only be run when called directly by the model as inputs will be formatted a priori'''
         h = self._orderedAttrs if h == None else h

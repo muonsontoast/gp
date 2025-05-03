@@ -17,7 +17,8 @@ def SE(x0, x1, h):
 def RQ(x0, x1, h):
     h, v = jnp.asarray(h[0]), x0 - x1
     hlen = int((h.shape[0] - 1) / 2) + 1
-    return h[0] * jnp.prod((1 + v ** 2 / (2 * h[1:hlen] * h[hlen:])) ** -h[hlen:])
+    # return h[0] * jnp.prod((1 + v ** 2 / (2 * h[1:hlen] * h[hlen:])) ** -h[hlen:])
+    return h[0] * jnp.exp(jnp.sum(jnp.log((1 + v ** 2 / (2 * h[1:hlen] * h[hlen:])) ** -h[hlen:])))
 
 @jit
 def Per(x0, x1, h):
