@@ -157,46 +157,34 @@ class GP:
 
         for e in range(numEpochs):
             print(f'Epoch {e + 1}/{numEpochs}')
-            # xnext = self.PickNextPoint(x, info['means'][:, 0][:, None, None], info['variances'][:, 0][:, None, None])
             xnext = self.PickNextPoint(x, info['means'][:, 0][:, None, None])
             x = jnp.concatenate((x, xnext[:, None]))
-            # self.UnNormaliseDomainPoints(xnext)
-            # ynew = jnp.array([jnp.array([jnp.array([objective(xnext) for repeat in range(numRepeatMeasurements)]).flatten() for objective in self.VOCS['objectives'].values()])])
             ynew = jnp.array([jnp.array([jnp.array([objective(self.UnNormaliseDomainPoints(xnext)) for repeat in range(numRepeatMeasurements + 1)]).flatten() for objective in self.VOCS['objectives'].values()])])
             ynew = self.NormaliseMeasurements(ynew, info['rng'], info['mn'])
-            # UnNormaliseMeasurements(self, y, variances, rng, mn, bestObjectiveValues = None)
-            # y = jnp.concatenate((y, ynew))
             info['y'] = jnp.concatenate((info['y'], ynew['y']))
-            # newmean = jnp.mean(ynew['means'], -1)
-            # means = jnp.concatenate((means, newmean))
             info['means'] = jnp.concatenate((info['means'], ynew['means']))
             info['variances'] = jnp.concatenate((info['variances'], ynew['variances']))
-            # bestObjectiveValues = jnp.append(bestObjectiveValues, ynew['means'][0, 0])
             bestObjectiveValues = jnp.append(bestObjectiveValues, jnp.maximum(ynew['means'][0, 0], bestObjectiveValues[-1]))
-            # variances = jnp.concatenate((variances, jnp.var(ynew, -1, ddof = 1)))
-            # self.FitKernelHyperparams(x, info['means'][:, 0], info['variances'][:, 0])
             self.FitKernelHyperparams(x, info['means'][:, 0], info['variances'][:, 0])
 
         result = self.UnNormaliseMeasurements(info['y'], info['variances'], info['rng'], info['mn'], bestObjectiveValues)
-        result['x'] = self.UnNormaliseDomainPoints(x)
 
         self.AF[0].beta = 1
-        argmax = self.PickNextPoint(x, info['y'], 0)
+        argmax = self.PickNextPoint(x, info['means'][:, 0][:, None, None], 0)
         print('Recommended working point is:', self.UnNormaliseDomainPoints(argmax))
         self.AF[0].beta = self.AF[1]['beta']
         result['argmax'] = argmax
         print('Optimisation complete!')
 
+        result['x'] = self.UnNormaliseDomainPoints(x)
         return result
     
-    @partial(jit, static_argnums = 0)
-    def PickNextPoint(self, x, y, noiseAmplitude = 5e-3, numIterations = 500, numRestarts = 5, returnAll = False):
+    def PickNextPoint(self, x, y, noiseAmplitude = 5e-3, numIterations = 1000, numRestarts = 10, returnAll = False):
         optimiser = optax.chain(
-            self.optimiser(5e-2)
+            self.optimiser(1e-1)
         )
         key = jrd.PRNGKey(np.random.randint(0, 100000))
-        xs = self.SelectInitialDomainPoints(numRestarts)
-        xs = self.NormaliseDomainPoints(xs)
+        xs = jnp.array(np.random.randn(numRestarts, 1))
         valueAndGrad = value_and_grad(self.AcquisitionFunctionAtInput, argnums = 2)
 
         @jit
@@ -204,7 +192,7 @@ class GP:
             h, state = carry
             v, g = valueAndGrad(x, y, h[:, None])
             u, state = optimiser.update(-g[0], state, h)
-            return (jnp.clip(h + u[0], 0, 1), state), v
+            return (h + u[0], state), v
         
         @jit
         def OuterLoop(h):
@@ -213,17 +201,18 @@ class GP:
             return finalX, v
         
         finalXs, vs = vmap(OuterLoop)(xs)
+        finalXs = sigmoid(finalXs)
 
         if returnAll:
             return (jnp.clip(finalXs + noiseAmplitude * jrd.normal(key, shape = finalXs.shape), 0, 1), vs)
-        return jnp.clip(finalXs[jnp.argmax(vs[:, -1])] + noiseAmplitude * np.random.randn(), 0, 1)
+        return jnp.clip(finalXs[jnp.argmax(vs[:, -1])] + noiseAmplitude * jrd.normal(key, shape = 1), 0, 1)
 
-    @partial(jit, static_argnums = 0)
     def AcquisitionFunctionAtInput(self, x, y, xnew):
+        xnew = sigmoid(xnew)
         result = self.fit(x, y, xnew, False)
         return self.AF[0](result['means'].ravel(), result['variances'].ravel())[0]
         
-    def FitKernelHyperparams(self, x, y, variance, numIterations = 350, numRestarts = 20, returnAll = False):
+    def FitKernelHyperparams(self, x, y, variance, numIterations = 1000, numRestarts = 5, returnAll = False):
         attrs = []
         for attr in self.kernel._orderedAttrs:
             attrs += attr
@@ -246,7 +235,7 @@ class GP:
         @jit
         def OuterLoop(h, key):
             global optimiser
-            lr = 1e-3
+            lr = 5e-2
             if self.optimiserName == 'lbfgs':
                 optimiser = self.optimiser()
             else:
@@ -307,11 +296,6 @@ class GP:
     def ConstructMeasurementNoiseMatrix(self, x, variance = None):
         variance = jnp.zeros(x.shape[0]) if len(variance) == 0 else variance
         return jnp.diag(variance + global_smoothing_factor)
-    
-    # def NormaliseInputs(self, x, xnew):
-    #     lw, up = jnp.min(x), jnp.max(x)
-    #     rng = up - lw
-    #     return (x - lw) / rng, (xnew - lw) / rng
 
     @partial(jit, static_argnums = 0)
     def NormaliseDomainPoints(self, x):
@@ -382,6 +366,10 @@ def warp(e, y, a = 1):
 @jit
 def unwarp(e, y, a = 1):
     return e / (1 - jnp.tanh(a * y))
+
+@jit
+def sigmoid(x):
+    return 1 / (1 + jnp.exp(-x))
 
 @partial(jit, static_argnums = 0)
 def FastConstructCovarianceMatrix(f, x, y, h):

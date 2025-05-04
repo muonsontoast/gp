@@ -39,7 +39,7 @@ class UCB(AcquisitionFunction):
         object.__setattr__(self, 'name', 'Upper Confidence Bound (UCB)')
         object.__setattr__(self, 'beta', 2)
 
-    @partial(jit, static_argnums = 0)
+    # @partial(jit, static_argnums = 0)
     def __call__(self, mean, variance):
         '''A simple mean-variance trade-off whose greediness is controlled by `beta`'''
         return mean + self.beta * jnp.sqrt(variance)
@@ -50,7 +50,7 @@ class UCBI(AcquisitionFunction):
         object.__setattr__(self, 'name', 'Upper Confidence Bound Interpolate (UCBI)')
         object.__setattr__(self, 'beta', .8)
 
-    @partial(jit, static_argnums = 0)
+    # @partial(jit, static_argnums = 0)
     def __call__(self, mean, variance):
         '''A simple mean-variance trade-off whose greediness is controlled by an interpolation `beta`'''
         return self.beta * mean + (1 - self.beta) * jnp.sqrt(variance)
