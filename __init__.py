@@ -24,7 +24,7 @@ plt.rcParams['font.family'] = 'Times'
 plt.rcParams['font.size'] = 12
 
 jax.config.update("jax_enable_x64", True)
-global_smoothing_factor = 1e-2 # necessary to maintain stability for large covariance matrices
+global_smoothing_factor = 1e-5 # necessary to maintain stability for large covariance matrices
 
 optimisers = dict(
     sgd = optax.sgd,
