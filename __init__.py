@@ -13,6 +13,7 @@ from functools import partial
 import matplotlib.pyplot as plt
 from scipy.stats.qmc import LatinHypercube as lhs
 from enum import Enum
+from copy import deepcopy
 
 from gp.kernels import *
 from gp.acquisitionfuncs import *
@@ -23,7 +24,7 @@ plt.rcParams['font.family'] = 'Times'
 plt.rcParams['font.size'] = 12
 
 jax.config.update("jax_enable_x64", True)
-global_smoothing_factor = 1e-6 # necessary to maintain stability for large covariance matrices
+global_smoothing_factor = 1e-2 # necessary to maintain stability for large covariance matrices
 
 optimisers = dict(
     sgd = optax.sgd,
@@ -115,7 +116,7 @@ class GP:
             S22 = self.ConstructCovarianceMatrix(xnew, xnew)
             S2 = S22 - solved @ S12
             evals, evecs = jnp.linalg.eigh(S2)
-            S2 = evecs @ jnp.diag(jnp.maximum(evals, 1e-6)) @ evecs.T
+            S2 = evecs @ jnp.diag(jnp.maximum(evals, 1e-5)) @ evecs.T
 
             result = self.UnNormaliseMeasurements((self.f(xnew) + solved @ (info['means'] - self.f(x)))[:, None, None], jnp.diag(S2)[:, None], info['rng'], info['mn'])
             A = jnp.diag(info['rng'][0] * jnp.ones(len(xnew)))
@@ -125,7 +126,7 @@ class GP:
         else:
             print('Input data is the wrong dimension!')
 
-    def optimise(self, numEpochs = 1, numInitialRandomSamples = 3, numRepeatMeasurements = 1, threshold = 1e-2, mode = 'maximise', **kwargs):
+    def optimise(self, numEpochs = 1, numInitialRandomSamples = 3, numRepeatMeasurements = 1, mode = 'maximise', **kwargs):
         '''You must first specify a VOCS dictionary with variables and objectives (constraints optional).\n
         `numInitialRandomPoints` = how many initial points to randomly sample (cold/warm start).\n
         `numEpochs` = how many epochs to run optimiser.\n
@@ -134,7 +135,6 @@ class GP:
         set `ignoreVariance` = true to ignore measurement variance (useful for heteroscedastic models).'''
         ignoreVariance = kwargs.get('ignoreVariance', False)
         numInitialRandomSamples = jnp.maximum(numInitialRandomSamples, 2)
-        self.AF[0].SetHyperparameters(self.AF[1])
         if mode.lower() == 'maximise':
             selectBest = lambda x: jnp.argmax(x, 0)
         else: # defaults to minimisation
@@ -150,16 +150,19 @@ class GP:
 
         # temporarily setting to y[:, 0] until full multi objective implemented
 
-        if ignoreVariance:
-            self.FitKernelHyperparams(x, info['means'][:, 0], 1e-4 * jnp.ones(len(x)))
-        else:
-            self.FitKernelHyperparams(x, info['means'][:, 0], info['variances'][:, 0])
+        # if ignoreVariance:
+        #     self.FitKernelHyperparams(x, info['means'][:, 0], 1e-4 * jnp.ones(len(x)))
+        # else:
+        #     self.FitKernelHyperparams(x, info['means'][:, 0], info['variances'][:, 0])
 
         for e in range(numEpochs):
             print(f'Epoch {e + 1}/{numEpochs}')
-            xnext = self.PickNextPoint(x, info['means'][:, 0][:, None, None])
-            x = jnp.concatenate((x, xnext[:, None]))
-            ynew = jnp.array([jnp.array([jnp.array([objective(self.UnNormaliseDomainPoints(xnext)) for repeat in range(numRepeatMeasurements + 1)]).flatten() for objective in self.VOCS['objectives'].values()])])
+            self.AF[1]['yBest'] = bestObjectiveValues[-1]
+            self.AF[0].SetHyperparameters(self.AF[1])
+            xnext = self.PickNextPoint(self.UnNormaliseDomainPoints(x), y)
+            x = jnp.concatenate((x, self.NormaliseDomainPoints(xnext)))
+            ynew = jnp.array([jnp.array([jnp.array([objective(xnext[0]) for repeat in range(numRepeatMeasurements + 1)]).flatten() for objective in self.VOCS['objectives'].values()])])
+            y = jnp.concatenate((y, ynew))
             ynew = self.NormaliseMeasurements(ynew, info['rng'], info['mn'])
             info['y'] = jnp.concatenate((info['y'], ynew['y']))
             info['means'] = jnp.concatenate((info['means'], ynew['means']))
@@ -168,107 +171,146 @@ class GP:
             self.FitKernelHyperparams(x, info['means'][:, 0], info['variances'][:, 0])
 
         result = self.UnNormaliseMeasurements(info['y'], info['variances'], info['rng'], info['mn'], bestObjectiveValues)
+        unnormalisedX = self.UnNormaliseDomainPoints(x)
+        result['x'] = unnormalisedX
 
+        AFOld = deepcopy(self.AF[0])
+        self.AF[0] = UCBI()
         self.AF[0].beta = 1
-        argmax = self.PickNextPoint(x, info['means'][:, 0][:, None, None], 0)
-        print('Recommended working point is:', self.UnNormaliseDomainPoints(argmax))
-        self.AF[0].beta = self.AF[1]['beta']
-        result['argmax'] = argmax
+        xnext = self.PickNextPoint(unnormalisedX, y, 0)
+        self.AF[0] = AFOld
+        result['xnext'] = xnext[0]
+        result['ynext'] = self.fit(unnormalisedX, result['y'], xnext, False)['y'].ravel()
+        print('Recommended working point is:', xnext[0])
         print('Optimisation complete!')
 
-        result['x'] = self.UnNormaliseDomainPoints(x)
         return result
-    
-    def PickNextPoint(self, x, y, noiseAmplitude = 5e-3, numIterations = 1000, numRestarts = 10, returnAll = False):
-        optimiser = optax.chain(
-            self.optimiser(1e-1)
-        )
+
+    def PickNextPoint(self, x, y, noiseAmplitude = 5e-3, numIterations = 150, numRestarts = 20):
         key = jrd.PRNGKey(np.random.randint(0, 100000))
-        xs = jnp.array(np.random.randn(numRestarts, 1))
-        valueAndGrad = value_and_grad(self.AcquisitionFunctionAtInput, argnums = 2)
+        xs = self.SelectInitialDomainPoints(numRestarts)
+
+        @jit
+        def AcquisitionFunctionAtInputWrapper(xi):
+            return self.AcquisitionFunctionAtInput(x, y, xi) * -1.
+
+        solver = optax.lbfgs(memory_size = 15)
+        valueAndGrad = optax.value_and_grad_from_state(AcquisitionFunctionAtInputWrapper)
 
         @jit
         def InnerLoop(carry, it):
-            h, state = carry
-            v, g = valueAndGrad(x, y, h[:, None])
-            u, state = optimiser.update(-g[0], state, h)
-            return (h + u[0], state), v
-        
-        @jit
-        def OuterLoop(h):
-            state = optimiser.init(h)
-            (finalX, state), v = lax.scan(InnerLoop, (h, state), None, length = numIterations)
-            return finalX, v
-        
-        finalXs, vs = vmap(OuterLoop)(xs)
-        finalXs = sigmoid(finalXs)
+            xi, optState = carry
+            value, grad = valueAndGrad(xi, state = optState)
+            updates, optState = solver.update(
+                grad, optState, xi, value = value, grad = grad, value_fn = AcquisitionFunctionAtInputWrapper
+            )
+            return (jnp.clip(xi + updates, self.bounds[0], self.bounds[1]), optState), value
 
-        if returnAll:
-            return (jnp.clip(finalXs + noiseAmplitude * jrd.normal(key, shape = finalXs.shape), 0, 1), vs)
-        return jnp.clip(finalXs[jnp.argmax(vs[:, -1])] + noiseAmplitude * jrd.normal(key, shape = 1), 0, 1)
+        @jit
+        def OuterLoop(xi):
+            optState = solver.init(xi)
+            (xi, optState), value = lax.scan(InnerLoop, (xi, optState), None, length = numIterations)
+            return xi, value[-1]
+        
+        finalXs, vs = vmap(OuterLoop)(xs[:, None])
+        return jnp.clip(finalXs[jnp.argmin(vs)] + noiseAmplitude * jrd.normal(key, shape = 1), self.bounds[0], self.bounds[1])
 
     def AcquisitionFunctionAtInput(self, x, y, xnew):
-        xnew = sigmoid(xnew)
         result = self.fit(x, y, xnew, False)
         return self.AF[0](result['means'].ravel(), result['variances'].ravel())[0]
-        
-    def FitKernelHyperparams(self, x, y, variance, numIterations = 1000, numRestarts = 5, returnAll = False):
+    
+    def FitKernelHyperparams(self, x, y, variance, numIterations = 200, numRestarts = 15, returnAll = False):
         attrs = []
         for attr in self.kernel._orderedAttrs:
             attrs += attr
 
-        hs = jnp.array(np.random.randn(numRestarts, len(attrs)))
-        gradLL = value_and_grad(self.LogLikelihood, argnums = 3)
+        xv = self.ConstructMeasurementNoiseMatrix(x, variance)
 
-        if self.optimiserName == 'lbfgs':
-            optimiser = self.optimiser()
-        else:
-            optimiser = self.optimiser(.1)
+        @jit
+        def LogLikelihoodWrapper(xi):
+            S = self.ConstructCovarianceMatrix(x, x, self.kernel.Convert2OrderedAttrs(xi)) + xv
+            return self.LogLikelihood(y, S)
+            
+
+        hs = jnp.array(np.random.randn(numRestarts, len(attrs)))
+        # gradLL = value_and_grad(self.LogLikelihood, argnums = 3)
+        gradLL = value_and_grad(LogLikelihoodWrapper)
+        optimiser = optimisers['adamw'](5e-3)
 
         @jit
         def InnerLoop(carry, it):
             h, state = carry
-            ll, g = gradLL(x, y, variance, jnp.exp(h))
+            # ll, g = gradLL(x, y, variance, jnp.exp(h))
+            ll, g = gradLL(jnp.exp(h))
             u, state = optimiser.update(g, state, h)
             return (h + u, state), ll
         
         @jit
-        def OuterLoop(h, key):
-            global optimiser
-            lr = 5e-2
-            if self.optimiserName == 'lbfgs':
-                optimiser = self.optimiser()
-            else:
-                optimiser = self.optimiser(lr)
+        def OuterLoop(h):
             state = optimiser.init(h)
             (finalH, state), ll = lax.scan(InnerLoop, (h, state), None, length = numIterations)
             return jnp.exp(finalH), ll
 
-        rndIdx = np.random.randint(0, 10000)
-        keys = jrd.split(jrd.PRNGKey(rndIdx), numRestarts)
-        self.seed = rndIdx
-
-        finalHs, lls = vmap(OuterLoop)(hs, keys)
+        finalHs, lls = vmap(OuterLoop)(hs)
         if returnAll:
             return (finalHs, lls)
         self.kernel.SetAttrs(list(finalHs[jnp.argmin(lls[:, -1])]))
 
+    # def FitKernelHyperparams(self, x, y, variance, numIterations = 100, numRestarts = 30, returnAll = False):
+    #     attrs = []
+    #     for attr in self.kernel._orderedAttrs:
+    #         attrs += attr
+
+    #     @jit
+    #     def LogLikelihoodWrapper(xi):
+    #         return self.LogLikelihood(x, y, variance, jnp.exp(xi))
+
+    #     xs = jnp.array(np.random.randn(numRestarts, len(attrs)))
+    #     solver = optax.lbfgs(memory_size = 15)
+    #     valueAndGrad = optax.value_and_grad_from_state(LogLikelihoodWrapper)
+
+    #     @jit
+    #     def InnerLoop(carry, it):
+    #         xi, optState = carry
+    #         value, grad = valueAndGrad(xi, state = optState)
+    #         updates, optState = solver.update(
+    #             grad, optState, xi, value = value, grad = grad, value_fn = LogLikelihoodWrapper
+    #         )
+    #         return (xi + updates, optState), value
+
+    #     @jit
+    #     def OuterLoop(xi):
+    #         optState = solver.init(xi)
+    #         (xi, optState), value = lax.scan(InnerLoop, (xi, optState), None, length = numIterations)
+    #         return jnp.exp(xi), value
+        
+    #     finalXs, vs = vmap(OuterLoop)(xs)
+    #     # print('ooh!')
+    #     # print(finalXs[jnp.argmin(vs)])
+    #     self.kernel.SetAttrs(list(finalXs[jnp.argmin(vs[:, -1])]))
+    #     # return jnp.clip(finalXs[jnp.argmin(vs)] + noiseAmplitude * jrd.normal(key, shape = 1), self.bounds[0], self.bounds[1])
+
+    # @partial(jit, static_argnums = 0)
+    # def LogLikelihood(self, x, y, variance, h = None):
+    #     if h != None:
+    #         S = self.ConstructCovarianceMatrix(x, x, self.kernel.Convert2OrderedAttrs(h)) + self.ConstructMeasurementNoiseMatrix(x, variance)
+    #     else: S = self.ConstructCovarianceMatrix(x, x) + self.ConstructMeasurementNoiseMatrix(x, variance)
+    #     chol = jnp.linalg.cholesky(S)
+    #     Snew = jnp.linalg.solve(chol, y)
+    #     det = 2 * jnp.sum(jnp.log(jnp.diag(chol)))
+    #     return Snew.T @ Snew + det
+
     @partial(jit, static_argnums = 0)
-    def LogLikelihood(self, x, y, variance, h = None):
-        if h != None:
-            S = self.ConstructCovarianceMatrix(x, x, self.kernel.Convert2OrderedAttrs(h)) + self.ConstructMeasurementNoiseMatrix(x, variance)
-        else: S = self.ConstructCovarianceMatrix(x, x) + self.ConstructMeasurementNoiseMatrix(x, variance)
-        chol = jnp.linalg.cholesky(S)
-        Snew = jnp.linalg.solve(chol, y)
-        det = 2 * jnp.sum(jnp.log(jnp.diag(chol)))
-        return Snew.T @ Snew + det
-    
+    def LogLikelihood(self, y, S):
+        # chol = jnp.linalg.cholesky(S)
+        l, lower = jax.scipy.linalg.cho_factor(S)
+        Snew = jax.scipy.linalg.cho_solve((l, lower), y)
+        return y.T @ Snew + 2 * jnp.sum(jnp.log(jnp.diag(l)))
+
+    @partial(jit, static_argnums = (0)) # should this be kept or not?? remove 1, 2?
     def ConstructCovarianceMatrix(self, x, y, h = None):
         h = self.kernel._orderedAttrs if h == None else h
-        if x.shape[1] == y.shape[1]:
-            if self.DimensionCheck(x):
-                return FastConstructCovarianceMatrix(self.kernel.f, x, y, h)
-        else: print('Input data is the wrong dimension!')
+        return FastConstructCovarianceMatrix(self.kernel.f, x, y, h)
 
     def DisplayCovarianceMatrix(self, m, extent = None, cmap = 'viridis'):
         fig, ax = plt.subplots()
@@ -293,6 +335,7 @@ class GP:
         x = [x] if type(x) in [int, float] else x
         return jnp.array(x).reshape(len(x), -1)
     
+    @partial(jit, static_argnums = 0)
     def ConstructMeasurementNoiseMatrix(self, x, variance = None):
         variance = jnp.zeros(x.shape[0]) if len(variance) == 0 else variance
         return jnp.diag(variance + global_smoothing_factor)
@@ -304,9 +347,6 @@ class GP:
     @partial(jit, static_argnums = 0)
     def UnNormaliseDomainPoints(self, x):
         return x * (self.bounds[1] - self.bounds[0]) + self.bounds[0]
-        
-    # def NormaliseMeasurements(self, y, stdY, rng, lw):
-    #     return (y - lw) / rng, stdY / rng
 
     @partial(jit, static_argnums = 0)
     def NormaliseMeasurements(self, y, _rng = None, _mn = None):
@@ -338,11 +378,7 @@ class GP:
             'means': jnp.mean(ynew, -1),
             'variances': variances * rng ** 2,
         }
-        # return (y - mn[None, :, None]) / rng[None, :, None], variances * rng ** 2
         return result
-        
-    # def UnNormaliseOutputs(self, y, stdY, rng, lw):
-    #     return y * rng + lw, stdY * rng
 
     def SelectInitialDomainPoints(self, numPoints = 5):
         '''Use Latin Hypercube Sampling to generate starting points to optimise forwards from.

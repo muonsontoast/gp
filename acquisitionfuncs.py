@@ -3,9 +3,10 @@ Author: Shaun Preston (John Adams Institute, University of Oxford, Diamond Light
 
 Acquisition functions for bayesian optimisation with GPs
 """
-from jax import jit
-import jax.numpy as jnp
 from functools import partial
+from jax.scipy.special import erf
+import jax.numpy as jnp
+from jax import jit
 from scipy.stats import qmc
 import gp
 from copy import deepcopy as cp
@@ -39,7 +40,6 @@ class UCB(AcquisitionFunction):
         object.__setattr__(self, 'name', 'Upper Confidence Bound (UCB)')
         object.__setattr__(self, 'beta', 2)
 
-    # @partial(jit, static_argnums = 0)
     def __call__(self, mean, variance):
         '''A simple mean-variance trade-off whose greediness is controlled by `beta`'''
         return mean + self.beta * jnp.sqrt(variance)
@@ -50,10 +50,33 @@ class UCBI(AcquisitionFunction):
         object.__setattr__(self, 'name', 'Upper Confidence Bound Interpolate (UCBI)')
         object.__setattr__(self, 'beta', .8)
 
-    # @partial(jit, static_argnums = 0)
     def __call__(self, mean, variance):
         '''A simple mean-variance trade-off whose greediness is controlled by an interpolation `beta`'''
         return self.beta * mean + (1 - self.beta) * jnp.sqrt(variance)
+    
+class EI(AcquisitionFunction):
+    '''Expected Improvement acquisition function'''
+    def __init__(self):
+        object.__setattr__(self, 'name', 'Expected Improvement (EI)')
+        object.__setattr__(self, 'xi', .01)  # Small exploration boost
+        object.__setattr__(self, 'yBest', 0)  # Will be set externally during BO
+
+    def __call__(self, mean, variance):
+        '''Expected improvement over the current best observation'''
+        std = jnp.sqrt(variance)  # Add small jitter for stability
+        delta = mean - self.yBest - self.xi
+        z = delta / std
+
+        improvement = delta * self.Phi(z) + std * self.phi(z)
+        return jnp.where(variance > 0, improvement, 0)
+    
+    @partial(jit, static_argnums = 0)
+    def Phi(self, x):
+        return .5 * (1 + erf(x / jnp.sqrt(2)))
+    
+    @partial(jit, static_argnums = 0)
+    def phi(self, x):
+        return jnp.exp(-.5 * x ** 2) / jnp.sqrt(2 * jnp.pi)
 
 class TuRBO(AcquisitionFunction):
     '''Adaptive local Bayesian optimisation'''
