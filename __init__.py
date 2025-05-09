@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from scipy.stats.qmc import LatinHypercube as lhs
 from enum import Enum
 from copy import deepcopy
+from cothread.catools import caget, caput
 
 from gp.kernels import *
 from gp.acquisitionfuncs import *
@@ -24,7 +25,7 @@ plt.rcParams['font.family'] = 'Times'
 plt.rcParams['font.size'] = 12
 
 jax.config.update("jax_enable_x64", True)
-global_smoothing_factor = 1e-5 # necessary to maintain stability for large covariance matrices
+global_smoothing_factor = 1e-6 # necessary to maintain stability for large covariance matrices
 
 optimisers = dict(
     sgd = optax.sgd,
@@ -47,6 +48,17 @@ noiseModels = ["Gaussian", "LogGaussian", "TruncatedGaussian", "Poisson"]
 
 class GP:
     '''Reference attribute names in **camelCase**'''
+    name: str
+    optimiserName: str
+    optimiser: optax.GradientTransformation
+    noiseModel: str
+    kernel: Kernel
+    bounds: jax.Array
+    f: None
+    seed: int
+    VOCS: dict
+    AF: list
+
     def __init__(self, dimension = 1, kernel = SE):
         super().__setattr__('name', 'GP')
         super().__setattr__('optimiserName', 'adamw')
@@ -66,7 +78,7 @@ class GP:
         lw = ''.join(f'{round(v_, 2):.2f}' for v_ in jnp.array(self.bounds[0]).flatten())
         up = ''.join(f'{round(v_, 2):.2f}' for v_ in jnp.array(self.bounds[1]).flatten())
         res += f'\nOptimiser Constraints: Lower = {lw}, Upper = {up}'
-        res += f'\nAcquisition Function: {self.acquisitionFunction.name}'
+        res += f'\nAcquisition Function: {self.AF[0].name}'
         res += f'\nNoise Model: {self.noiseModel}\n'
         return res
     
@@ -133,6 +145,7 @@ class GP:
         `threshold` = improvement threshold for which optimiser will terminate.\n
         `mode` = `maximise` or `minimise`.\n
         set `ignoreVariance` = true to ignore measurement variance (useful for heteroscedastic models).'''
+        caput('LI-TI-MTGEN-01:START', 1) # start the LINAC
         ignoreVariance = kwargs.get('ignoreVariance', False)
         numInitialRandomSamples = jnp.maximum(numInitialRandomSamples, 2)
         if mode.lower() == 'maximise':
@@ -141,8 +154,13 @@ class GP:
             selectBest = lambda x: jnp.argmin(x, 0)
         bestObjectiveValues = jnp.zeros(0) # only tracks the first objective ('best' meant for 1D obviously)
         x = self.SelectInitialDomainPoints(numInitialRandomSamples)
-        y = jnp.array([jnp.array([jnp.array([objective(x) for repeat in range(numRepeatMeasurements + 1)]).flatten() for objective in self.VOCS['objectives'].values()]) for x in x])
+        # y = jnp.array([jnp.array([jnp.array([objective(x) for repeat in range(numRepeatMeasurements + 1)]).flatten() for objective in self.VOCS['objectives'].values()]) for x in x])
+        y = jnp.array([jnp.array([objective(x, numRepeatMeasurements) for objective in self.VOCS['objectives'].values()]) for x in x])
         x = self.NormaliseDomainPoints(x)
+        # print(y)
+        # if ignoreVariance:
+        #     y = jnp.mean(y, -1)[:, None]
+        # print(y)
         info = self.NormaliseMeasurements(y)
 
         # we should track the best value if we have a single objective (always dumbly track the first objective)
@@ -151,9 +169,13 @@ class GP:
         # temporarily setting to y[:, 0] until full multi objective implemented
 
         # if ignoreVariance:
-        #     self.FitKernelHyperparams(x, info['means'][:, 0], 1e-4 * jnp.ones(len(x)))
-        # else:
-        #     self.FitKernelHyperparams(x, info['means'][:, 0], info['variances'][:, 0])
+        #     info['variances'] = 1e-1 * jnp.ones(info['variances'].shape)
+
+        if ignoreVariance:
+            self.FitKernelHyperparams(x, info['means'][:, 0], 1e-3 * jnp.ones(len(x)))
+            info['variances'] = 1e-3 * jnp.ones(info['variances'].shape)
+        else:
+            self.FitKernelHyperparams(x, info['means'][:, 0], info['variances'][:, 0])
 
         for e in range(numEpochs):
             print(f'Epoch {e + 1}/{numEpochs}')
@@ -161,28 +183,37 @@ class GP:
             self.AF[0].SetHyperparameters(self.AF[1])
             xnext = self.PickNextPoint(self.UnNormaliseDomainPoints(x), y)
             x = jnp.concatenate((x, self.NormaliseDomainPoints(xnext)))
-            ynew = jnp.array([jnp.array([jnp.array([objective(xnext[0]) for repeat in range(numRepeatMeasurements + 1)]).flatten() for objective in self.VOCS['objectives'].values()])])
+            # ynew = jnp.array([jnp.array([jnp.array([objective(xnext[0], numRepeatMeasurements) for repeat in range(numRepeatMeasurements + 1)]).flatten() for objective in self.VOCS['objectives'].values()])])
+            ynew = jnp.array([jnp.array([objective(x, numRepeatMeasurements) for objective in self.VOCS['objectives'].values()]) for x in xnext])
             y = jnp.concatenate((y, ynew))
             ynew = self.NormaliseMeasurements(ynew, info['rng'], info['mn'])
             info['y'] = jnp.concatenate((info['y'], ynew['y']))
             info['means'] = jnp.concatenate((info['means'], ynew['means']))
-            info['variances'] = jnp.concatenate((info['variances'], ynew['variances']))
+            if ignoreVariance:
+                info['variances'] = jnp.concatenate((info['variances'], 1e-3 * jnp.ones(ynew['variances'].shape)))
+            else:
+                info['variances'] = jnp.concatenate((info['variances'], ynew['variances']))
             bestObjectiveValues = jnp.append(bestObjectiveValues, jnp.maximum(ynew['means'][0, 0], bestObjectiveValues[-1]))
             self.FitKernelHyperparams(x, info['means'][:, 0], info['variances'][:, 0])
 
         result = self.UnNormaliseMeasurements(info['y'], info['variances'], info['rng'], info['mn'], bestObjectiveValues)
+
         unnormalisedX = self.UnNormaliseDomainPoints(x)
         result['x'] = unnormalisedX
 
         AFOld = deepcopy(self.AF[0])
         self.AF[0] = UCBI()
         self.AF[0].beta = 1
-        xnext = self.PickNextPoint(unnormalisedX, y, 0)
+        if ignoreVariance:
+            xnext = self.PickNextPoint(unnormalisedX, jnp.mean(y, -1)[:, None], 0)
+        else:
+            xnext = self.PickNextPoint(unnormalisedX, y, 0)
         self.AF[0] = AFOld
         result['xnext'] = xnext[0]
         result['ynext'] = self.fit(unnormalisedX, result['y'], xnext, False)['y'].ravel()
         print('Recommended working point is:', xnext[0])
         print('Optimisation complete!')
+        caput('LI-TI-MTGEN-01:STOP', 1) # stop the LINAC
 
         return result
 

@@ -12,6 +12,8 @@ import gp
 from copy import deepcopy as cp
 
 class AcquisitionFunction:
+    name: str
+
     def __init__(self, name):
         super().__setattr__('name', name.title())
 
@@ -36,6 +38,8 @@ class AcquisitionFunction:
 
 class UCB(AcquisitionFunction):
     '''Standard global Bayesian optimisation'''
+    beta: float
+
     def __init__(self):
         object.__setattr__(self, 'name', 'Upper Confidence Bound (UCB)')
         object.__setattr__(self, 'beta', 2)
@@ -46,6 +50,8 @@ class UCB(AcquisitionFunction):
     
 class UCBI(AcquisitionFunction):
     '''Standard global Bayesian optimisation'''
+    beta: float
+    
     def __init__(self):
         object.__setattr__(self, 'name', 'Upper Confidence Bound Interpolate (UCBI)')
         object.__setattr__(self, 'beta', .8)
@@ -56,6 +62,9 @@ class UCBI(AcquisitionFunction):
     
 class EI(AcquisitionFunction):
     '''Expected Improvement acquisition function'''
+    xi: float
+    yBest: float
+
     def __init__(self):
         object.__setattr__(self, 'name', 'Expected Improvement (EI)')
         object.__setattr__(self, 'xi', .01)  # Small exploration boost
@@ -80,26 +89,31 @@ class EI(AcquisitionFunction):
 
 class TuRBO(AcquisitionFunction):
     '''Adaptive local Bayesian optimisation'''
+    l: float
+    lmin: float
+    lmax: float
+    tau: float
+
     def __init__(self, l = .25, lmin = .01, lmax = 1, tau = 3):
         self.name = 'Trust Region Bayesian Optimisation (TRBO)'
         self.l, self.lmin, self.lmax = l, lmin, lmax
         self.tau = tau
 
-    def GenerateInitialTrustRegions(self, parentGP, numPoints = 4):
-        '''Accepts a GP as input and returns LHS initial samples based on its bounds.'''
-        sampler = qmc.LatinHypercube(parentGP.bounds.shape[1])
-        self.trustRegionCentres = sampler.random(numPoints)
-        self.trustRegionWidths = [self.l for _ in range(numPoints)]
-        self.GPs = [gp.GP() for _ in range(numPoints)]
-        self.GPInputs = [jnp.empty(0) for _ in range(numPoints)]
-        self.GPOutputs = [jnp.empty(0) for _ in range(numPoints)]
-        self.GPVariances = [jnp.empty(0) for _ in range(numPoints)]
+    # def GenerateInitialTrustRegions(self, parentGP, numPoints = 4):
+    #     '''Accepts a GP as input and returns LHS initial samples based on its bounds.'''
+    #     sampler = qmc.LatinHypercube(parentGP.bounds.shape[1])
+    #     self.trustRegionCentres = sampler.random(numPoints)
+    #     self.trustRegionWidths = [self.l for _ in range(numPoints)]
+    #     self.GPs = [gp.GP() for _ in range(numPoints)]
+    #     self.GPInputs = [jnp.empty(0) for _ in range(numPoints)]
+    #     self.GPOutputs = [jnp.empty(0) for _ in range(numPoints)]
+    #     self.GPVariances = [jnp.empty(0) for _ in range(numPoints)]
         
-        # initialise local GPs
-        for _ in range(numPoints):
-            self.GPs[_].bounds = jnp.array([jnp.clip(self.trustRegionCentres[_] - self.trustRegionWidths[_], 0, 1), jnp.clip(self.trustRegionCentres[_] + self.trustRegionWidths[_], 0, 1)])
+    #     # initialise local GPs
+    #     for _ in range(numPoints):
+    #         self.GPs[_].bounds = jnp.array([jnp.clip(self.trustRegionCentres[_] - self.trustRegionWidths[_], 0, 1), jnp.clip(self.trustRegionCentres[_] + self.trustRegionWidths[_], 0, 1)])
 
-    def BinMeasurements(self, x, y, variances):
-        for _, g in enumerate(self.GPs):
-            cond = x >= g.bounds[0] and x <= g.bounds[1]
-            self.GPInputs[_], self.GPOutputs[_], self.GPVariances[_] = x[cond], y[cond], variances[cond]
+    # def BinMeasurements(self, x, y, variances):
+    #     for _, g in enumerate(self.GPs):
+    #         cond = x >= g.bounds[0] and x <= g.bounds[1]
+    #         self.GPInputs[_], self.GPOutputs[_], self.GPVariances[_] = x[cond], y[cond], variances[cond]

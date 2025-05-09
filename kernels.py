@@ -18,6 +18,18 @@ incorrectInputDimensionMessage = 'Input data is the wrong dimension!'
 
 class Kernel:
     '''Kernel base class'''
+    name: str
+    dimension: int
+    description: str
+    components: list
+    componentNames: list
+    f: None
+    _orderedAttrs: list
+    amplitude: list
+    lengthscale: list
+    exponent: list
+    period: list
+    offset: list
 
     def __init__(self, dimension = 1):
         super().__setattr__('name', 'General')
